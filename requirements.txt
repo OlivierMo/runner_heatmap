@@ -1,0 +1,7 @@
+streamlit
+pandas
+fitdecode 
+folium 
+pyarrow
+streamlit-folium
+pyyaml

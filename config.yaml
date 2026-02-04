@@ -1,0 +1,15 @@
+paths:
+  default_folder: "~/data/GarminFits"
+  cache_file: "cache_data.parquet"
+
+performance:
+  max_displayed_points: 200000   # Reduce if you experience lagging
+  gps_rounding: 4   # Decimals kept for gps precision (5 decimals means ~1.1m rounding, 5 decimals means ~11m)
+
+ui:
+  port: 8080
+  title: "Garmin Heatmap (Leaflet Mode)"
+  default_lat: 48.8566
+  default_lon: 2.3522
+  default_zoom: 11
+  excluded_sports: ['81', '70', 'None', 'dance', 'generic']
