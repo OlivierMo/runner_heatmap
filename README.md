@@ -43,5 +43,9 @@ pip3 install -r requirements.txt
 3. **Run the app**
 ```bash
 streamlit run app.py
+```
+Application can then be reached on http://localhost:8501/
 
-Application can be reached on http://localhost:8501/
+
+## Configuration
+Coordinates are rounded to 5 decimal places (~1m) for optimal performance and accuracy. This can be changed in config file
