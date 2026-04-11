@@ -1,234 +1,538 @@
-import streamlit as st
-import fitdecode
-import pandas as pd
-import folium
-from folium.plugins import HeatMap
-from streamlit_folium import st_folium
+import asyncio
+import gzip
+import json
 import os
+from datetime import date, timedelta
+
+import pandas as pd
 import yaml
-from datetime import datetime, date
+from fastapi.responses import Response
+from nicegui import app as _ng_app, core as _ng_core, ui, Client
 
+from data import (
+    CACHE_FILE,
+    ERRORS_FILE,
+    DEFAULT_FOLDER,
+    EXCLUDED_SPORTS,
+    load_and_process_all_data,
+    load_errors,
+)
 
-with open("config.yaml", "r") as f:
-    config = yaml.safe_load(f)
+with open("config.yaml") as f:
+    _cfg = yaml.safe_load(f)
 
-DEFAULT_FOLDER = os.path.expanduser(config['paths']['default_folder'])
-CACHE_FILE = config['paths']['cache_file']
+APP_TITLE    = _cfg['ui']['title']
+DEFAULT_LAT  = _cfg['ui']['default_lat']
+DEFAULT_LON  = _cfg['ui']['default_lon']
+DEFAULT_ZOOM = _cfg['ui']['default_zoom']
+APP_PORT     = _cfg['ui'].get('port', 8080)
 
-MAX_DISPLAY_POINTS = config['performance']['max_displayed_points']
-GPS_ROUNDING = config['performance']['gps_rounding']
-
-APP_TITLE = config['ui']['title']
-DEFAULT_COORD = (config['ui']['default_lat'], config['ui']['default_lon'])
-DEFAULT_ZOOM = config['ui']['default_zoom']
-EXCLUDED_SPORTS = config['ui']['excluded_sports']
-
-
-MAP_TILES = {
-    "Clair (OpenStreetMap)": "OpenStreetMap",
-    "Relief (OpenTopoMap)": "OpenTopoMap",
-    "Satellite (Esri World Imagery)": "Esri WorldImagery",
-    "Sombre (CartoDB DarkMatter)": "CartoDB dark_matter",
+TILE_OPTIONS = {
+    "dark":      "Sombre (CartoDB)",
+    "osm":       "Clair (OpenStreetMap)",
+    "satellite": "Satellite (ESRI)",
+    "topo":      "Relief (OpenTopoMap)",
 }
 
+MODE_OPTIONS = {
+    "heatmap":     "Heatmap",
+    "heatmap_log": "Heatmap (échelle log)",
+    "scatter":     "Parcours",
+}
 
-st.set_page_config(page_title=APP_TITLE, layout="wide")
+DRAWER_W    = 310
+SLIDER_BASE = date(2020, 1, 1)
 
-
-def is_activity_file(file_path):
-    try:
-        with fitdecode.FitReader(file_path) as fit:
-            for frame in fit:
-                if frame.frame_type == fitdecode.FIT_FRAME_DATA and frame.name == 'file_id':
-                    file_type = frame.get_value('type')
-                    return file_type in ['activity', 4]
-            return False
-    except Exception:
-        return False
-
-def process_single_fit_file(file_path):
-    """Reads fit file and returns a DataFrame."""
-    points = []
-    sport = "Unknown"
-    sub_sport = "Unknown"
-    activity_name = "Sans nom"
-    try:
-        with fitdecode.FitReader(file_path, check_crc=False) as fit:
-            for frame in fit:
-                if frame.frame_type == fitdecode.FIT_FRAME_DATA:
-                    if frame.name == 'session' or frame.name == 'sport':
-                        if frame.has_field('sport'):
-                            sport = str(frame.get_value('sport'))
-                        if frame.has_field('sub_sport'):
-                            sub_sport = str(frame.get_value('sub_sport'))
-                        if frame.has_field('name'):
-                            activity_name = str(frame.get_value('name'))
-
-                    if frame.name == 'record' and frame.has_field('position_lat') and frame.has_field('position_long'):
-                        raw_lat = frame.get_value('position_lat')
-                        raw_lon = frame.get_value('position_long')
-
-                        if raw_lat is not None and raw_lon is not None:
-                            points.append({
-                                'lat': raw_lat * (180 / 2**31),
-                                'lon': raw_lon * (180 / 2**31),
-                                'time': frame.get_value('timestamp') if frame.has_field('timestamp') else None
-                            })
-    except Exception as e:
-        if not points: return {'error': f"Crash: {e}"}
-
-    if not points: return {'error': "Aucun point GPS"}
-
-    df = pd.DataFrame(points)
-    df['sport'] = str(sport)
-    df['sub_sport'] = str(sub_sport)
-    df['activity_name'] = str(activity_name)
-    df['file_name'] = os.path.basename(file_path)
-    return df
+_data_cache:   dict  = {}
+_map_payload:  bytes = gzip.compress(b'{"data":[],"mode":"heatmap","tile":"dark"}', compresslevel=1)
 
 
-@st.cache_resource
-def load_and_process_all_data(folder_path):
-    if os.path.exists(CACHE_FILE):
-        return pd.read_parquet(CACHE_FILE)
-
-    all_dfs, error_list = [], []
-    files_to_process = []
-
-    for root, _, files in os.walk(folder_path):
-        for file in files:
-            if file.endswith('.fit'):
-                path = os.path.join(root, file)
-                if is_activity_file(path): files_to_process.append(path)
-
-    if not files_to_process: return pd.DataFrame()
-
-    prog_bar = st.sidebar.progress(0)
-    for i, path in enumerate(files_to_process):
-        result = process_single_fit_file(path)
-        if isinstance(result, dict):
-            error_list.append((os.path.basename(path), result['error']))
-        else:
-            all_dfs.append(result)
-        prog_bar.progress((i + 1) / len(files_to_process))
-
-    prog_bar.empty()
-    st.session_state['fit_errors'] = error_list
-
-    if all_dfs:
-        full_df = pd.concat(all_dfs, ignore_index=True)
-        full_df['time'] = pd.to_datetime(full_df['time'], utc=True)
-        full_df['lat'] = full_df['lat'].round(GPS_ROUNDING)
-        full_df['lon'] = full_df['lon'].round(GPS_ROUNDING)
-        full_df.to_parquet(CACHE_FILE)
-        return full_df
-    return pd.DataFrame()
+@_ng_app.get('/mapdata')
+def _mapdata_endpoint():
+    # Serve pre-compressed bytes — no work done in the event loop.
+    return Response(
+        content=_map_payload,
+        media_type='application/json',
+        headers={'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding'},
+    )
 
 
-def render_diagnostics(df):
-    """Display loading errors."""
-    with st.sidebar.expander("🛠️ Menu Diagnostic & Erreurs", expanded=False):
-        if 'fit_errors' in st.session_state and st.session_state['fit_errors']:
-            st.subheader("❌ Erreurs de lecture")
-            error_df = pd.DataFrame(st.session_state['fit_errors'], columns=["Fichier", "Détail"])
-            st.dataframe(error_df, use_container_width=True)
-            st.divider()
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-        to_check_df = df[df['sport'].isin(EXCLUDED_SPORTS + ["Unknown"])]
-        if not to_check_df.empty:
-            st.subheader("🔍 À vérifier")
-            summary = to_check_df.groupby(['file_name', 'sport']).size().reset_index(name='Pts')
-            st.dataframe(summary, use_container_width=True)
-        else:
-            st.success("Données propres.")
-
-def render_map(display_df, mode, tiles):
-    m = folium.Map(location=DEFAULT_COORD, zoom_start=DEFAULT_ZOOM, tiles=tiles)
-
-    if mode == "Heatmap (Densité)":
-        heat_data = display_df[['lat', 'lon', 'weight']].values.tolist()
-        HeatMap(heat_data, radius=7, blur=5, min_opacity=0.2).add_to(m)
-    else:
-        for _, row in display_df.iterrows():
-            folium.CircleMarker(
-                location=[row['lat'], row['lon']],
-                radius=1, color='red', fill=True, weight=0
-            ).add_to(m)
-
-    st_folium(m, use_container_width=True, height=800, key=f"map_{mode}_{tiles}", returned_objects=[])
+def _days(d: date) -> int:
+    return max(0, (d - SLIDER_BASE).days)
 
 
+def _date(v: int) -> date:
+    return SLIDER_BASE + timedelta(days=int(v))
 
-def main():
-    with st.sidebar:
-        st.title(f"🏃‍♂️ {APP_TITLE}")
 
-        folder_path = st.text_input("Dossier .fit", value=DEFAULT_FOLDER)
+def _fmt(d: date) -> str:
+    return d.strftime('%d/%m/%Y')
 
-        if st.button("🔄 Forcer le rechargement"):
-            if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
-            st.cache_resource.clear()
-            st.rerun()
 
-    if not folder_path or not os.path.isdir(folder_path):
-        st.info("Sélectionnez un dossier valide dans la barre latérale.")
-        return
+def _filter_df(df: pd.DataFrame, sports: list, d_from: date, d_to: date) -> pd.DataFrame:
+    mask = (
+        df['sport'].isin(sports)
+        & (df['time'].dt.date >= d_from)
+        & (df['time'].dt.date <= d_to)
+    )
+    return df[mask]
 
-    df_raw = load_and_process_all_data(folder_path)
 
-    if df_raw.empty:
-        st.sidebar.warning("Aucune donnée trouvée.")
-        return
+def _to_display_data(filtered: pd.DataFrame) -> list:
+    if filtered.empty:
+        return []
+    agg = filtered.groupby(['lat', 'lon']).size().reset_index(name='w')
+    return agg[['lat', 'lon', 'w']].values.tolist()
 
-    df_clean = df_raw[~df_raw['sport'].isin(EXCLUDED_SPORTS)]
-    all_sports = sorted(df_clean['sport'].unique())
-    default_selection = [s for s in all_sports if s.lower() == 'running']
 
-    with st.sidebar:
-        display_mode = st.selectbox("Mode d'affichage", ["Heatmap (Densité)", "Parcours (Points)"])
-        tile_name = st.selectbox("Fond de carte", list(MAP_TILES.keys()))
-        selected_sports = st.pills(
-            "Sports",
-            all_sports,
-            selection_mode="multi",
-            default=default_selection
+# ---------------------------------------------------------------------------
+# deck.gl JavaScript
+# ---------------------------------------------------------------------------
+
+_MAP_JS = """
+(function () {
+  // Create the map container and append it directly to <body>,
+  // OUTSIDE NiceGUI's Vue-managed DOM tree so reactive updates never destroy it.
+  if (!document.getElementById('map-container')) {
+    const d = document.createElement('div');
+    d.id = 'map-container';
+    document.body.appendChild(d);
+  }
+
+  const { DeckGL, TileLayer, BitmapLayer, HeatmapLayer, ScatterplotLayer } = deck;
+
+  const TILES = {
+    dark:      'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+    osm:       'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    topo:      'https://tile.opentopomap.org/{z}/{x}/{y}.png',
+    satellite: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  };
+
+  const HEAT_COLORS = [
+    [1,   152, 189, 180],
+    [73,  227, 206, 190],
+    [216, 254, 181, 200],
+    [254, 237, 177, 210],
+    [254, 173,  84, 220],
+    [209,  55,  78, 230],
+  ];
+
+  function makeTileLayer(key) {
+    return new TileLayer({
+      id: 'base',
+      data: TILES[key] || TILES.dark,
+      tileSize: 256,
+      renderSubLayers: props => {
+        const { bbox: { west, south, east, north } } = props.tile;
+        return new BitmapLayer(props, {
+          data: null, image: props.data, bounds: [west, south, east, north],
+        });
+      },
+    });
+  }
+
+  function makeHeatmap(data, logScale) {
+    return new HeatmapLayer({
+      id: 'heatmap',
+      data,
+      getPosition: d => [d[1], d[0]],
+      getWeight:   d => logScale ? Math.log1p(d[2] || 1) : (d[2] || 1),
+      radiusPixels: 30,
+      intensity:    logScale ? 3 : 1,
+      threshold:    0.03,
+      aggregation: 'SUM',
+      colorRange: HEAT_COLORS,
+    });
+  }
+
+  function makeScatter(data) {
+    return new ScatterplotLayer({
+      id: 'scatter',
+      data,
+      getPosition:     d => [d[1], d[0]],
+      getFillColor:    [249, 115, 22, 200],
+      getRadius:       30,
+      radiusMinPixels: 1,
+      radiusMaxPixels: 5,
+    });
+  }
+
+  let deckgl = null;
+
+  window.initMap = function (lat, lon, zoom) {
+    deckgl = new DeckGL({
+      container: 'map-container',
+      initialViewState: { latitude: lat, longitude: lon, zoom, pitch: 0, bearing: 0 },
+      controller: true,
+      layers: [makeTileLayer('dark')],
+    });
+  };
+
+  window.updateMap = function (data, mode, tileKey) {
+    if (!deckgl) return;
+    let layer;
+    if      (mode === 'heatmap')     layer = makeHeatmap(data, false);
+    else if (mode === 'heatmap_log') layer = makeHeatmap(data, true);
+    else                             layer = makeScatter(data);
+    deckgl.setProps({ layers: [makeTileLayer(tileKey), layer] });
+  };
+
+  // Fetch data from Python's HTTP endpoint and render.
+  // This decouples heavy data transfer from the WebSocket so the
+  // NiceGUI heartbeat is never blocked by a large JS eval.
+  window.fetchAndRender = function () {
+    fetch('/mapdata')
+      .then(r => r.json())
+      .then(p => window.updateMap(p.data, p.mode, p.tile))
+      .catch(e => console.error('fetchAndRender:', e));
+  };
+
+})();
+"""
+
+
+# ---------------------------------------------------------------------------
+# Page
+# ---------------------------------------------------------------------------
+
+@ui.page('/')
+async def main_page(client: Client):
+
+    state = {
+        'df_clean':        pd.DataFrame(),
+        'selected_sports': [],
+        'date_from':       date(2023, 1, 1),
+        'date_to':         date.today(),
+        'mode':            'heatmap',
+        'tile':            'dark',
+        'populating':      False,   # suppresses reactive handlers during _populate_ui
+    }
+
+    ui.colors(primary='#f97316')
+    ui.dark_mode().enable()
+
+    ui.add_head_html(
+        '<script src="https://unpkg.com/deck.gl@8.9.36/dist.min.js"></script>'
+        '<style>'
+        '  body, html { margin:0; padding:0; overflow:hidden; background:#0f172a; }'
+        f' #map-container {{'
+        f'   position:fixed; top:50px; left:{DRAWER_W}px; right:0; bottom:0;'
+        f'   transition: left 0.25s ease;'
+        f' }}'
+        '  .q-field--outlined .q-field__control { border-color:rgba(249,115,22,0.3) !important; }'
+        '  .q-field--outlined:hover .q-field__control { border-color:rgba(249,115,22,0.7) !important; }'
+        '  .q-chip { background:rgba(249,115,22,0.25) !important; color:#fdba74 !important; }'
+        '  .q-separator { background:rgba(255,255,255,0.07) !important; }'
+        '  .stat-lbl { font-size:0.68rem; color:#64748b; text-transform:uppercase; letter-spacing:.06em; }'
+        '  .stat-val { font-size:0.92rem; color:#f1f5f9; font-variant-numeric:tabular-nums; }'
+        '  .range-label { font-size:0.75rem; font-family:monospace; color:#fdba74; }'
+        '  .diag-row { display:flex; flex-direction:column; width:100%; overflow:hidden; margin-bottom:6px; }'
+        '  .diag-file { font-size:0.72rem; color:#cbd5e1; word-break:break-all; overflow-wrap:anywhere; }'
+        '  .diag-err  { font-size:0.68rem; color:#94a3b8; padding-left:8px; }'
+        '</style>'
+    )
+
+    # ── Header ──────────────────────────────────────────────────────────────
+    with ui.header().style(
+        'background:#0f172a; height:50px;'
+        'border-bottom:1px solid rgba(249,115,22,0.25);'
+    ).classes('items-center px-4 gap-3 text-white'):
+        ui.button(icon='menu', on_click=lambda: drawer.toggle()) \
+            .props('flat round dense color=white')
+        ui.icon('directions_run').style('color:#f97316')
+        ui.label(APP_TITLE).classes('text-sm font-semibold tracking-wide')
+
+    # ── Sidebar ─────────────────────────────────────────────────────────────
+    with ui.left_drawer(fixed=True).style(
+        f'width:{DRAWER_W}px; background:#111827;'
+        'border-right:1px solid rgba(255,255,255,0.06);'
+    ).classes('q-pa-md column gap-0') as drawer:
+
+        folder_input = (
+            ui.input('Dossier .fit', value=DEFAULT_FOLDER)
+            .props('dense dark outlined color=orange')
+            .classes('w-full')
+        )
+        reload_btn = (
+            ui.button('Recharger les données', icon='refresh')
+            .props('unelevated color=orange dense')
+            .classes('w-full q-mt-sm')
         )
 
-        if not selected_sports:
-            selected_sports = default_selection
+        ui.separator().classes('q-my-sm')
 
-        min_d = max(df_clean['time'].min().date(), date(2023, 1, 1))
-        max_d = datetime.now().date()
-
-        date_range = pd.date_range(start=min_d, end=max_d).date.tolist()
-
-        dates = st.select_slider(
-            "Sélectionnez la période",
-            options=date_range,
-            value=(min_d, max_d) # Valeur par défaut : tout l'historique
+        mode_select = (
+            ui.select(MODE_OPTIONS, value='heatmap', label="Mode d'affichage")
+            .props('dense dark outlined color=orange options-dark')
+            .classes('w-full')
+        )
+        tile_select = (
+            ui.select(TILE_OPTIONS, value='dark', label='Fond de carte')
+            .props('dense dark outlined color=orange options-dark')
+            .classes('w-full q-mt-sm')
         )
 
-    mask = (df_clean['sport'].isin(selected_sports))
-    if isinstance(dates, list) or isinstance(dates, tuple):
-        if len(dates) == 2:
-            mask &= (df_clean['time'].dt.date >= dates[0]) & (df_clean['time'].dt.date <= dates[1])
+        ui.separator().classes('q-my-sm')
 
-    filtered_df = df_clean[mask]
+        sports_select = (
+            ui.select([], multiple=True, label='Sports')
+            .props('dense dark outlined color=orange use-chips options-dark')
+            .classes('w-full')
+        )
 
-    render_diagnostics(df_raw)
+        ui.separator().classes('q-my-sm')
 
-    if not filtered_df.empty:
-        display_df = filtered_df.groupby(['lat', 'lon']).size().reset_index(name='weight')
+        with ui.row().classes('w-full items-center justify-between q-mb-xs'):
+            ui.label('Période').classes('stat-lbl')
+            range_dates_label = ui.label('—').classes('range-label')
 
-        if len(display_df) > MAX_DISPLAY_POINTS:
-            display_df = display_df.sample(MAX_DISPLAY_POINTS, random_state=42)
+        _sl_min = _days(date(2023, 1, 1))
+        _sl_max = _days(date.today())
+        range_slider = (
+            ui.range(min=_sl_min, max=_sl_max,
+                     value={'min': _sl_min, 'max': _sl_max})
+            .props('color=orange dark :step=1')
+            .classes('w-full q-px-xs')
+        )
+        range_slider.on_value_change(lambda e: range_dates_label.set_text(
+            f"{_fmt(_date(e.value['min']))}  →  {_fmt(_date(e.value['max']))}"
+        ))
 
-        st.sidebar.metric("Points chargés", f"{len(df_clean):,}")
-        st.sidebar.metric("Points affichés", f"{len(display_df):,}")
+        ui.separator().classes('q-my-sm')
 
-        render_map(display_df, display_mode, MAP_TILES[tile_name])
-    else:
-        st.warning("Aucune donnée pour les filtres sélectionnés.")
+        with ui.grid(columns=2).classes('w-full gap-0'):
+            with ui.row().classes('gap-1 items-center'):
+                ui.label('Points bruts').classes('stat-lbl')
+                ui.icon('info', size='xs').style('color:#475569').tooltip(
+                    'Total de points GPS dans le fichier cache,\n'
+                    'avant regroupement par cellule.'
+                )
+            with ui.row().classes('gap-1 items-center'):
+                ui.label('Cellules affichées').classes('stat-lbl')
+                ui.icon('info', size='xs').style('color:#475569').tooltip(
+                    f'Nombre de cellules uniques (lat/lon arrondi à {_cfg["performance"]["gps_rounding"]} décimales ≈ 11 m).\n'
+                    'Plusieurs passages au même endroit → 1 seule cellule, poids plus élevé.'
+                )
+            pts_label     = ui.label('—').classes('stat-val')
+            display_label = ui.label('—').classes('stat-val')
 
-if __name__ == "__main__":
-    main()
+        ui.separator().classes('q-my-sm')
+
+        with ui.expansion('Diagnostics du chargement', icon='bug_report') \
+                .props('dark').classes('w-full text-xs'):
+            diag_container = ui.column().classes('w-full gap-1')
+
+    # ── Map container ────────────────────────────────────────────────────────
+    # The #map-container div is created by _MAP_JS and appended directly to
+    # document.body, outside NiceGUI's Vue tree, so reactive updates never
+    # destroy the deck.gl canvas.
+
+    def on_drawer_change(e):
+        left = DRAWER_W if e.value else 0
+        client.run_javascript(
+            f"const m=document.getElementById('map-container'); if(m) m.style.left='{left}px';"
+        )
+    drawer.on_value_change(on_drawer_change)
+
+    # ── Map refresh ──────────────────────────────────────────────────────────
+    async def refresh_map():
+        if state['df_clean'].empty:
+            return
+        # All heavy work runs in a thread — never blocks the event loop.
+        def _build():
+            filtered = _filter_df(state['df_clean'], state['selected_sports'],
+                                  state['date_from'], state['date_to'])
+            data = _to_display_data(filtered)
+            raw = json.dumps({'data': data, 'mode': state['mode'], 'tile': state['tile']})
+            # Compress in the thread (level 1 = fast, ~80% smaller).
+            # Starlette GZipMiddleware skips responses that already have
+            # Content-Encoding set, so the event loop does zero work here.
+            compressed = gzip.compress(raw.encode(), compresslevel=1)
+            return len(data), compressed
+
+        n_cells, compressed = await asyncio.to_thread(_build)
+
+        global _map_payload
+        _map_payload = compressed
+
+        pts_label.set_text(f"{len(state['df_clean']):,}")
+        display_label.set_text(f"{n_cells:,}")
+
+        # Send a tiny trigger — browser fetches the full data over HTTP independently.
+        client.run_javascript("window.fetchAndRender()")
+
+    # ── Data loading ─────────────────────────────────────────────────────────
+    async def load_data(force: bool = False):
+        folder = os.path.expanduser(folder_input.value.strip())
+        if not folder or not os.path.isdir(folder):
+            ui.notify('Dossier invalide', type='negative')
+            return
+
+        if force:
+            for f in (CACHE_FILE, ERRORS_FILE):
+                if os.path.exists(f):
+                    os.remove(f)
+            _data_cache.pop(folder, None)
+
+        # ── Fast path: already in memory ────────────────────────────────────
+        if folder in _data_cache:
+            df, diag = _data_cache[folder]
+            _populate_ui(df, diag)
+            await refresh_map()
+            return
+
+        # ── Medium path: Parquet cache exists (no dialog needed) ─────────────
+        if os.path.exists(CACHE_FILE):
+            df, diag = await asyncio.to_thread(load_and_process_all_data, folder, None)
+            _data_cache[folder] = (df, diag)
+            _populate_ui(df, diag)
+            await refresh_map()
+            ui.notify('Données chargées ✓', type='positive')
+            return
+
+        # ── Slow path: process raw FIT files (show progress dialog) ──────────
+        progress_state = {'current': 0, 'total': 0}
+
+        def on_progress(i, total):
+            progress_state['current'] = i
+            progress_state['total']   = total
+
+        with ui.dialog().props('persistent') as dlg, \
+             ui.card().style('background:#1e293b; min-width:300px') \
+                      .classes('items-center gap-3 q-pa-lg'):
+            ui.spinner(size='xl', color='orange')
+            pct_label  = ui.label('0 %').classes('text-3xl font-bold').style('color:#f97316')
+            prog_bar   = ui.linear_progress(value=0, color='orange').classes('w-full')
+            prog_label = ui.label('Scan des fichiers .fit…') \
+                           .classes('text-sm text-slate-400')
+
+        dlg.open()
+
+        load_task = asyncio.ensure_future(
+            asyncio.to_thread(load_and_process_all_data, folder, on_progress)
+        )
+
+        def _tick():
+            t = progress_state['total']
+            c = progress_state['current']
+            if t > 0:
+                pct = c / t
+                pct_label.set_text(f"{pct:.0%}")
+                prog_bar.set_value(pct)
+                prog_label.set_text(f"{c} / {t} fichiers traités")
+
+        timer = ui.timer(0.15, _tick)
+        df, diag = await load_task
+        timer.cancel()
+        dlg.close()
+
+        _data_cache[folder] = (df, diag)
+        _populate_ui(df, diag)
+        await refresh_map()
+        ui.notify('Données chargées ✓', type='positive')
+
+    # ── Populate sidebar after load ───────────────────────────────────────────
+    def _populate_ui(df: pd.DataFrame, diag: dict):
+        if df.empty:
+            ui.notify('Aucune donnée trouvée.', type='warning')
+            return
+
+        state['populating'] = True
+        df_clean = df[~df['sport'].isin(EXCLUDED_SPORTS)]
+        state['df_clean'] = df_clean
+
+        sports  = sorted(df_clean['sport'].unique().tolist())
+        default = [s for s in sports if s.lower() == 'running'] or sports[:1]
+        sports_select.options    = sports
+        sports_select.value      = default
+        state['selected_sports'] = default
+
+        min_d  = df_clean['time'].min().date()
+        d_from = max(min_d, date(2023, 1, 1))
+        d_to   = date.today()
+        state['date_from'] = d_from
+        state['date_to']   = d_to
+
+        sl_from = _days(d_from)
+        sl_to   = _days(d_to)
+        range_slider.props(f':min={sl_from} :max={sl_to} :step=1')
+        range_slider.set_value({'min': sl_from, 'max': sl_to})
+        range_dates_label.set_text(f"{_fmt(d_from)}  →  {_fmt(d_to)}")
+
+        errors      = diag.get('errors', [])
+        no_gps      = diag.get('no_gps_count', 0)
+
+        diag_container.clear()
+        with diag_container:
+            if not errors and not no_gps:
+                ui.label('Tous les fichiers chargés ✓') \
+                    .classes('text-xs').style('color:#4ade80')
+            else:
+                if no_gps:
+                    ui.label(f"{no_gps} activité(s) sans GPS (intérieur)") \
+                        .classes('text-xs').style('color:#94a3b8')
+                if errors:
+                    ui.label(f"{len(errors)} fichier(s) illisible(s)") \
+                        .classes('text-xs q-mt-xs').style('color:#f87171')
+                    for fname, err in errors:
+                        with ui.element('div').classes('diag-row'):
+                            ui.label(f"• {fname}").classes('diag-file')
+                            ui.label(err).classes('diag-err')
+
+        state['populating'] = False
+
+    # ── Event wiring ─────────────────────────────────────────────────────────
+    reload_btn.on_click(lambda: load_data(force=True))
+
+    async def on_mode_change(e):
+        if state['populating']: return
+        state['mode'] = e.value
+        await refresh_map()
+    mode_select.on_value_change(on_mode_change)
+
+    async def on_tile_change(e):
+        if state['populating']: return
+        state['tile'] = e.value
+        await refresh_map()
+    tile_select.on_value_change(on_tile_change)
+
+    async def on_sport_change(e):
+        if state['populating']: return
+        state['selected_sports'] = e.value or []
+        await refresh_map()
+    sports_select.on_value_change(on_sport_change)
+
+    async def on_range_change(e):
+        if state['populating']: return
+        v = e.args
+        if not isinstance(v, dict) or 'min' not in v or 'max' not in v:
+            return
+        state['date_from'] = _date(v['min'])
+        state['date_to']   = _date(v['max'])
+        range_dates_label.set_text(
+            f"{_fmt(state['date_from'])}  →  {_fmt(state['date_to'])}"
+        )
+        await refresh_map()
+    range_slider.on('change', on_range_change)
+
+    # ── Init ─────────────────────────────────────────────────────────────────
+    async def _init():
+        await client.connected()
+        client.run_javascript(_MAP_JS)
+        client.run_javascript(f'window.initMap({DEFAULT_LAT}, {DEFAULT_LON}, {DEFAULT_ZOOM})')
+        if os.path.exists(CACHE_FILE):
+            await load_data()
+
+    ui.timer(0.1, _init, once=True)
+
+
+# Raise socket.io buffer limit to 32 MB so large JSON payloads (162k+ points)
+# don't silently drop the connection (default is 1 MB).
+_ng_core.sio.eio.max_http_buffer_size = 32 * 1024 * 1024
+
+ui.run(title=APP_TITLE, port=APP_PORT, reload=False, show=False,
+       gzip_middleware_factory=None)  # disabled: we pre-gzip /mapdata in a thread

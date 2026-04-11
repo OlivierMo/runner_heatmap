@@ -1,7 +1,5 @@
-streamlit
+nicegui
 pandas
-fitdecode 
-folium 
+fitdecode
 pyarrow
-streamlit-folium
 pyyaml
