@@ -28,16 +28,16 @@ DEFAULT_ZOOM = _cfg['ui']['default_zoom']
 APP_PORT     = _cfg['ui'].get('port', 8080)
 
 TILE_OPTIONS = {
-    "dark":      "Sombre (CartoDB)",
-    "osm":       "Clair (OpenStreetMap)",
+    "dark":      "Dark (CartoDB)",
+    "osm":       "Bright (OpenStreetMap)",
     "satellite": "Satellite (ESRI)",
     "topo":      "Relief (OpenTopoMap)",
 }
 
 MODE_OPTIONS = {
     "heatmap":     "Heatmap",
-    "heatmap_log": "Heatmap (échelle log)",
-    "scatter":     "Parcours",
+    "heatmap_log": "Heatmap (log scale)",
+    "scatter":     "Itineraries",
 }
 
 DRAWER_W    = 310
@@ -253,12 +253,12 @@ async def main_page(client: Client):
     ).classes('q-pa-md column gap-0') as drawer:
 
         folder_input = (
-            ui.input('Dossier .fit', value=DEFAULT_FOLDER)
+            ui.input('Fit files folder', value=DEFAULT_FOLDER)
             .props('dense dark outlined color=orange')
             .classes('w-full')
         )
         reload_btn = (
-            ui.button('Recharger les données', icon='refresh')
+            ui.button('Reload data', icon='refresh')
             .props('unelevated color=orange dense')
             .classes('w-full q-mt-sm')
         )
@@ -266,12 +266,12 @@ async def main_page(client: Client):
         ui.separator().classes('q-my-sm')
 
         mode_select = (
-            ui.select(MODE_OPTIONS, value='heatmap', label="Mode d'affichage")
+            ui.select(MODE_OPTIONS, value='heatmap', label="Display modes")
             .props('dense dark outlined color=orange options-dark')
             .classes('w-full')
         )
         tile_select = (
-            ui.select(TILE_OPTIONS, value='dark', label='Fond de carte')
+            ui.select(TILE_OPTIONS, value='dark', label='Map types')
             .props('dense dark outlined color=orange options-dark')
             .classes('w-full q-mt-sm')
         )
@@ -287,7 +287,7 @@ async def main_page(client: Client):
         ui.separator().classes('q-my-sm')
 
         with ui.row().classes('w-full items-center justify-between q-mb-xs'):
-            ui.label('Période').classes('stat-lbl')
+            ui.label('Period').classes('stat-lbl')
             range_dates_label = ui.label('—').classes('range-label')
 
         _sl_min = _days(date(2023, 1, 1))
@@ -306,23 +306,23 @@ async def main_page(client: Client):
 
         with ui.grid(columns=2).classes('w-full gap-0'):
             with ui.row().classes('gap-1 items-center'):
-                ui.label('Points bruts').classes('stat-lbl')
+                ui.label('Loaded points').classes('stat-lbl')
                 ui.icon('info', size='xs').style('color:#475569').tooltip(
-                    'Total de points GPS dans le fichier cache,\n'
-                    'avant regroupement par cellule.'
+                    'Total loaded satellite locations,\n'
+                    'before rounding and clustering.'
                 )
             with ui.row().classes('gap-1 items-center'):
-                ui.label('Cellules affichées').classes('stat-lbl')
+                ui.label('Displayed points').classes('stat-lbl')
                 ui.icon('info', size='xs').style('color:#475569').tooltip(
-                    f'Nombre de cellules uniques (lat/lon arrondi à {_cfg["performance"]["gps_rounding"]} décimales ≈ 11 m).\n'
-                    'Plusieurs passages au même endroit → 1 seule cellule, poids plus élevé.'
+                    f'Number of displayed locations after rounding (lat/lon rounded at {_cfg["performance"]["gps_rounding"]} decimals ≈ 11 m).\n'
+                    'Several visit on same location = 1 displayed point, with a more intense color on heatmap.'
                 )
             pts_label     = ui.label('—').classes('stat-val')
             display_label = ui.label('—').classes('stat-val')
 
         ui.separator().classes('q-my-sm')
 
-        with ui.expansion('Diagnostics du chargement', icon='bug_report') \
+        with ui.expansion('File loading diagnosis', icon='bug_report') \
                 .props('dark').classes('w-full text-xs'):
             diag_container = ui.column().classes('w-full gap-1')
 
@@ -369,7 +369,7 @@ async def main_page(client: Client):
     async def load_data(force: bool = False):
         folder = os.path.expanduser(folder_input.value.strip())
         if not folder or not os.path.isdir(folder):
-            ui.notify('Dossier invalide', type='negative')
+            ui.notify('Invalid folder', type='negative')
             return
 
         if force:
@@ -391,7 +391,7 @@ async def main_page(client: Client):
             _data_cache[folder] = (df, diag)
             _populate_ui(df, diag)
             await refresh_map()
-            ui.notify('Données chargées ✓', type='positive')
+            ui.notify('Loaded data ✓', type='positive')
             return
 
         # ── Slow path: process raw FIT files (show progress dialog) ──────────
@@ -407,7 +407,7 @@ async def main_page(client: Client):
             ui.spinner(size='xl', color='orange')
             pct_label  = ui.label('0 %').classes('text-3xl font-bold').style('color:#f97316')
             prog_bar   = ui.linear_progress(value=0, color='orange').classes('w-full')
-            prog_label = ui.label('Scan des fichiers .fit…') \
+            prog_label = ui.label('Scanning .fit files…') \
                            .classes('text-sm text-slate-400')
 
         dlg.open()
@@ -423,7 +423,7 @@ async def main_page(client: Client):
                 pct = c / t
                 pct_label.set_text(f"{pct:.0%}")
                 prog_bar.set_value(pct)
-                prog_label.set_text(f"{c} / {t} fichiers traités")
+                prog_label.set_text(f"{c} / {t} processed files")
 
         timer = ui.timer(0.15, _tick)
         df, diag = await load_task
@@ -433,12 +433,12 @@ async def main_page(client: Client):
         _data_cache[folder] = (df, diag)
         _populate_ui(df, diag)
         await refresh_map()
-        ui.notify('Données chargées ✓', type='positive')
+        ui.notify('Loaded data ✓', type='positive')
 
     # ── Populate sidebar after load ───────────────────────────────────────────
     def _populate_ui(df: pd.DataFrame, diag: dict):
         if df.empty:
-            ui.notify('Aucune donnée trouvée.', type='warning')
+            ui.notify('No data found.', type='warning')
             return
 
         state['populating'] = True
@@ -469,14 +469,14 @@ async def main_page(client: Client):
         diag_container.clear()
         with diag_container:
             if not errors and not no_gps:
-                ui.label('Tous les fichiers chargés ✓') \
+                ui.label('All files loaded ✓') \
                     .classes('text-xs').style('color:#4ade80')
             else:
                 if no_gps:
-                    ui.label(f"{no_gps} activité(s) sans GPS (intérieur)") \
+                    ui.label(f"{no_gps} activitie(s) without GPS (interior)") \
                         .classes('text-xs').style('color:#94a3b8')
                 if errors:
-                    ui.label(f"{len(errors)} fichier(s) illisible(s)") \
+                    ui.label(f"{len(errors)} corrupted file(s)") \
                         .classes('text-xs q-mt-xs').style('color:#f87171')
                     for fname, err in errors:
                         with ui.element('div').classes('diag-row'):
