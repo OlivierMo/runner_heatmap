@@ -14,8 +14,8 @@ from data import (
     ERRORS_FILE,
     DEFAULT_FOLDER,
     EXCLUDED_SPORTS,
+    GPS_ROUNDING,
     load_and_process_all_data,
-    load_errors,
 )
 
 with open("config.yaml") as f:
@@ -49,7 +49,6 @@ _map_payload:  bytes = gzip.compress(b'{"data":[],"mode":"heatmap","tile":"dark"
 
 @_ng_app.get('/mapdata')
 def _mapdata_endpoint():
-    # Serve pre-compressed bytes — no work done in the event loop.
     return Response(
         content=_map_payload,
         media_type='application/json',
@@ -73,7 +72,7 @@ def _fmt(d: date) -> str:
     return d.strftime('%d/%m/%Y')
 
 
-def _filter_df(df: pd.DataFrame, sports: list, d_from: date, d_to: date) -> pd.DataFrame:
+def _filter_df(df: pd.DataFrame, sports: list[str], d_from: date, d_to: date) -> pd.DataFrame:
     mask = (
         df['sport'].isin(sports)
         & (df['time'].dt.date >= d_from)
@@ -82,10 +81,10 @@ def _filter_df(df: pd.DataFrame, sports: list, d_from: date, d_to: date) -> pd.D
     return df[mask]
 
 
-def _to_display_data(filtered: pd.DataFrame) -> list:
-    if filtered.empty:
+def _to_display_data(df: pd.DataFrame) -> list[list]:
+    if df.empty:
         return []
-    agg = filtered.groupby(['lat', 'lon']).size().reset_index(name='w')
+    agg = df.groupby(['lat', 'lon']).size().reset_index(name='w')
     return agg[['lat', 'lon', 'w']].values.tolist()
 
 
@@ -314,7 +313,7 @@ async def main_page(client: Client):
             with ui.row().classes('gap-1 items-center'):
                 ui.label('Displayed points').classes('stat-lbl')
                 ui.icon('info', size='xs').style('color:#475569').tooltip(
-                    f'Number of displayed locations after rounding (lat/lon rounded at {_cfg["performance"]["gps_rounding"]} decimals ≈ 11 m).\n'
+                    f'Number of displayed locations after rounding (lat/lon rounded at {GPS_ROUNDING} decimals ≈ 11 m).\n'
                     'Several visit on same location = 1 displayed point, with a more intense color on heatmap.'
                 )
             pts_label     = ui.label('—').classes('stat-val')
@@ -342,17 +341,13 @@ async def main_page(client: Client):
     async def refresh_map():
         if state['df_clean'].empty:
             return
-        # All heavy work runs in a thread — never blocks the event loop.
-        def _build():
+
+        def _build() -> tuple[int, bytes]:
             filtered = _filter_df(state['df_clean'], state['selected_sports'],
                                   state['date_from'], state['date_to'])
             data = _to_display_data(filtered)
             raw = json.dumps({'data': data, 'mode': state['mode'], 'tile': state['tile']})
-            # Compress in the thread (level 1 = fast, ~80% smaller).
-            # Starlette GZipMiddleware skips responses that already have
-            # Content-Encoding set, so the event loop does zero work here.
-            compressed = gzip.compress(raw.encode(), compresslevel=1)
-            return len(data), compressed
+            return len(data), gzip.compress(raw.encode(), compresslevel=1)
 
         n_cells, compressed = await asyncio.to_thread(_build)
 
@@ -361,8 +356,6 @@ async def main_page(client: Client):
 
         pts_label.set_text(f"{len(state['df_clean']):,}")
         display_label.set_text(f"{n_cells:,}")
-
-        # Send a tiny trigger — browser fetches the full data over HTTP independently.
         client.run_javascript("window.fetchAndRender()")
 
     # ── Data loading ─────────────────────────────────────────────────────────
@@ -378,14 +371,12 @@ async def main_page(client: Client):
                     os.remove(f)
             _data_cache.pop(folder, None)
 
-        # ── Fast path: already in memory ────────────────────────────────────
         if folder in _data_cache:
             df, diag = _data_cache[folder]
             _populate_ui(df, diag)
             await refresh_map()
             return
 
-        # ── Medium path: Parquet cache exists (no dialog needed) ─────────────
         if os.path.exists(CACHE_FILE):
             df, diag = await asyncio.to_thread(load_and_process_all_data, folder, None)
             _data_cache[folder] = (df, diag)
@@ -394,7 +385,7 @@ async def main_page(client: Client):
             ui.notify('Loaded data ✓', type='positive')
             return
 
-        # ── Slow path: process raw FIT files (show progress dialog) ──────────
+        # No cache — process raw FIT files with a progress dialog.
         progress_state = {'current': 0, 'total': 0}
 
         def on_progress(i, total):
@@ -412,7 +403,7 @@ async def main_page(client: Client):
 
         dlg.open()
 
-        load_task = asyncio.ensure_future(
+        load_task = asyncio.create_task(
             asyncio.to_thread(load_and_process_all_data, folder, on_progress)
         )
 
@@ -513,9 +504,6 @@ async def main_page(client: Client):
             return
         state['date_from'] = _date(v['min'])
         state['date_to']   = _date(v['max'])
-        range_dates_label.set_text(
-            f"{_fmt(state['date_from'])}  →  {_fmt(state['date_to'])}"
-        )
         await refresh_map()
     range_slider.on('change', on_range_change)
 
