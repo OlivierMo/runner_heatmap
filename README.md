@@ -1,51 +1,67 @@
-# Runner Heatmap
+# Sport Heatmap
 
-This project provides a python web application that helps you visualize your geolocalized sports history as an interactive **Heatmap**. It transforms raw `.fit` files into a clean, filterable map to visualize your training patterns over time.
+A Python web application that visualizes your geolocalized sports history as an interactive heatmap. It transforms raw `.fit` files into a filterable, high-performance map to explore your training patterns over time.
 
-## Main features
+![App screenshot](screenshot.png)
 
-  - **Sport filter**: Quickly toggle activities (e.g. running, cycling, hiking)
-  - **Date filter**: Choose the activity period you want to display.
-  - **Map style**: Toggle between different map modes : satellite, terrain, light and dark.
-  - **Caching**: A cache_data.parquet file is created locally. If you add new files, use the "Force Reload" button to refresh the cache.
+## Features
 
-## How to get your `.fit` files
+- **Three display modes**: Heatmap, Log-scale heatmap (highlights rarely-run paths), Scatter (individual GPS traces)
+- **Sport filter**: Toggle activity types (running, cycling, hiking, …)
+- **Date range slider**: Select the period to display with a double slider
+- **Map styles**: Dark (CartoDB), OpenStreetMap, Satellite (ESRI), Terrain (OpenTopoMap)
+- **Performance**: WebGL rendering via deck.gl — handles 1M+ GPS points smoothly
+- **Caching**: Processed data is saved to `cache_data.parquet`. Use "Reload data" to rebuild after adding new files.
 
-To use this app, you need your historical activity data. You can request a full export from Garmin:
+## Getting your `.fit` files
 
-1. **Log in** to [Garmin Account Management](https://www.garmin.com/en-US/account/datamanagement/).
-2. Select **Export Your Data**.
-3. Click **Request Data Export**.
-4. **Wait for the email**: Garmin will send you a download link (this can take anywhere from an hour to a few days depending on your history).
-5. **Extract the ZIP**: Once downloaded, look for the `DI_CONNECT/DI-Connect-Fitness-Uploaded-Files` folder. This folder contains all your original `.fit` files.
-6. **Point the App**: Copy the path to that folder and paste it into the "Garmin Folder" input in the app sidebar.
+### Garmin
 
+1. Log in to [Garmin Account Management](https://www.garmin.com/en-US/account/datamanagement/)
+2. Select **Export Your Data** → **Request Data Export**
+3. Wait for the download email (a few hours to a few days depending on your history)
+4. Extract the ZIP and navigate to `DI_CONNECT/DI-Connect-Fitness-Uploaded-Files`
+5. Paste that folder path into the "Fit files folder" input in the sidebar
 
-## Installation and lauch
+### Other brands
 
-1. **Set up and activate virtual python3 env**
+Coros, Suunto, Polar, and Wahoo all support `.fit` file export. The app will work with any folder containing `.fit` activity files regardless of device brand.
+
+- **Coros**: Training Hub → export activities as `.fit`
+- **Suunto**: Suunto App → export to `.fit` via the web interface or third-party sync (e.g. intervals.icu)
+- **Polar**: Polar Flow → export individual activities as `.fit`
+
+## Installation
+
+Requires **Python 3.9+**. Works on macOS, Linux, and Windows.
+
 ```bash
-# Create the environment
+# Create and activate a virtual environment
 python3 -m venv venv
+source venv/bin/activate        # macOS/Linux
+# .\venv\Scripts\activate       # Windows
 
-# Activate it (macOS/Linux)
-source venv/bin/activate
-
-# Activate it (Windows)
-# .\venv\Scripts\activate
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-2. **Install dependencies**
+## Running
+
 ```bash
-pip3 install -r requirements.txt
+python app.py
 ```
 
-3. **Run the app**
-```bash
-streamlit run app.py
-```
-Application can then be reached on http://localhost:8501/
-
+Open [http://localhost:8080](http://localhost:8080) in your browser.
 
 ## Configuration
-Coordinates are rounded to 5 decimal places (~1m) for optimal performance and accuracy. This can be changed in config file
+
+Edit `config.yaml` to change defaults:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `paths.default_folder` | `~/data/GarminFits` | Pre-filled folder path in the sidebar |
+| `paths.cache_file` | `cache_data.parquet` | Location of the Parquet cache |
+| `performance.gps_rounding` | `5` | Decimal places kept on lat/lon (5 ≈ 1.1 m, 4 ≈ 11 m) |
+| `ui.port` | `8080` | HTTP port |
+| `ui.default_lat/lon/zoom` | Paris, zoom 11 | Initial map position |
+| `ui.min_date` | `2023-01-01` | Earliest selectable date. Filters out aberrant GPS timestamps (e.g. `1970-01-01` recorded on failed syncs). Set to the date of your first activity. |

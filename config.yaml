@@ -12,3 +12,4 @@ ui:
   default_lon: 2.3522
   default_zoom: 11
   excluded_sports: ['81', '70', 'None', 'dance', 'generic']
+  min_date: "2023-01-01"   # Earliest date selectable — filters out aberrant GPS timestamps

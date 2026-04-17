@@ -26,6 +26,7 @@ DEFAULT_LAT  = _cfg['ui']['default_lat']
 DEFAULT_LON  = _cfg['ui']['default_lon']
 DEFAULT_ZOOM = _cfg['ui']['default_zoom']
 APP_PORT     = _cfg['ui'].get('port', 8080)
+MIN_DATE     = date.fromisoformat(_cfg['ui'].get('min_date', '2020-01-01'))
 
 TILE_OPTIONS = {
     "dark":      "Dark (CartoDB)",
@@ -204,7 +205,7 @@ async def main_page(client: Client):
     state = {
         'df_clean':        pd.DataFrame(),
         'selected_sports': [],
-        'date_from':       date(2023, 1, 1),
+        'date_from':       MIN_DATE,
         'date_to':         date.today(),
         'mode':            'heatmap',
         'tile':            'dark',
@@ -289,7 +290,7 @@ async def main_page(client: Client):
             ui.label('Period').classes('stat-lbl')
             range_dates_label = ui.label('—').classes('range-label')
 
-        _sl_min = _days(date(2023, 1, 1))
+        _sl_min = _days(MIN_DATE)
         _sl_max = _days(date.today())
         range_slider = (
             ui.range(min=_sl_min, max=_sl_max,
@@ -443,7 +444,7 @@ async def main_page(client: Client):
         state['selected_sports'] = default
 
         min_d  = df_clean['time'].min().date()
-        d_from = max(min_d, date(2023, 1, 1))
+        d_from = max(min_d, MIN_DATE)
         d_to   = date.today()
         state['date_from'] = d_from
         state['date_to']   = d_to
