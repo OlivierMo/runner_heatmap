@@ -170,7 +170,9 @@ _MAP_JS = """
       getWidth: 3,
       widthMinPixels: 1,
       widthMaxPixels: 4,
-      rounded: true,
+      rounded: false,           // 'false' accélère le rendu GPU par rapport à 'true' !
+      billboard: false,
+      updateTriggers: {}       // Empêche les recalculs inutiles de géométrie
     });
   }
 
