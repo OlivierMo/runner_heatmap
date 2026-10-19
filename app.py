@@ -93,11 +93,35 @@ def _to_path_data(df: pd.DataFrame) -> list[dict]:
     if df.empty:
         return []
     paths = []
+    
+    # Seuil d'inactivité au-delà duquel on considère qu'il y a eu une coupure 
+    # (ex: transport en commun, pause très longue de plus de 15 minutes)
+    MAX_TIME_GAP = timedelta(minutes=15)
+    
     for file_name, group in df.groupby('file_name'):
         sorted_group = group.sort_values('time')
-        coords = sorted_group[['lon', 'lat']].values.tolist()
-        if len(coords) > 1:
-            paths.append({'path': coords, 'name': file_name})
+        current_path = []
+        
+        prev_row = None
+        for _, row in sorted_group.iterrows():
+            lat, lon, t = row['lat'], row['lon'], row['time']
+            
+            if prev_row is not None and pd.notna(t) and pd.notna(prev_row['time']):
+                time_diff = t - prev_row['time']
+                
+                # Si le trou temporel est trop grand, on coupe le tracé actuel
+                if time_diff > MAX_TIME_GAP:
+                    if len(current_path) > 1:
+                        paths.append({'path': current_path, 'name': file_name})
+                    current_path = [] # On repart sur un nouveau segment indépendant
+            
+            current_path.append([lon, lat])
+            prev_row = row
+            
+        # Ajouter le dernier segment de la course
+        if len(current_path) > 1:
+            paths.append({'path': current_path, 'name': file_name})
+            
     return paths
 
 
@@ -170,9 +194,9 @@ _MAP_JS = """
       getWidth: 3,
       widthMinPixels: 1,
       widthMaxPixels: 4,
-      rounded: false,           // 'false' accélère le rendu GPU par rapport à 'true' !
+      rounded: false,           
       billboard: false,
-      updateTriggers: {}       // Empêche les recalculs inutiles de géométrie
+      updateTriggers: {}
     });
   }
 
