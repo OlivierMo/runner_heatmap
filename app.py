@@ -89,6 +89,18 @@ def _to_display_data(df: pd.DataFrame) -> list[list]:
     return agg[['lat', 'lon', 'w']].values.tolist()
 
 
+def _to_path_data(df: pd.DataFrame) -> list[dict]:
+    if df.empty:
+        return []
+    paths = []
+    for file_name, group in df.groupby('file_name'):
+        sorted_group = group.sort_values('time')
+        coords = sorted_group[['lon', 'lat']].values.tolist()
+        if len(coords) > 1:
+            paths.append({'path': coords, 'name': file_name})
+    return paths
+
+
 # ---------------------------------------------------------------------------
 # deck.gl JavaScript
 # ---------------------------------------------------------------------------
@@ -103,7 +115,7 @@ _MAP_JS = """
     document.body.appendChild(d);
   }
 
-  const { DeckGL, TileLayer, BitmapLayer, HeatmapLayer, ScatterplotLayer } = deck;
+  const { DeckGL, TileLayer, BitmapLayer, HeatmapLayer, PathLayer } = deck;
 
   const TILES = {
     dark:      'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
@@ -149,15 +161,16 @@ _MAP_JS = """
     });
   }
 
-  function makeScatter(data) {
-    return new ScatterplotLayer({
-      id: 'scatter',
+  function makePathLayer(data) {
+    return new PathLayer({
+      id: 'path-layer',
       data,
-      getPosition:     d => [d[1], d[0]],
-      getFillColor:    [249, 115, 22, 200],
-      getRadius:       30,
-      radiusMinPixels: 1,
-      radiusMaxPixels: 5,
+      getPath: d => d.path,
+      getColor: [249, 115, 22, 180],
+      getWidth: 3,
+      widthMinPixels: 1,
+      widthMaxPixels: 4,
+      rounded: true,
     });
   }
 
@@ -177,7 +190,7 @@ _MAP_JS = """
     let layer;
     if      (mode === 'heatmap')     layer = makeHeatmap(data, false);
     else if (mode === 'heatmap_log') layer = makeHeatmap(data, true);
-    else                             layer = makeScatter(data);
+    else                             layer = makePathLayer(data);
     deckgl.setProps({ layers: [makeTileLayer(tileKey), layer] });
   };
 
@@ -346,17 +359,22 @@ async def main_page(client: Client):
         def _build() -> tuple[int, bytes]:
             filtered = _filter_df(state['df_clean'], state['selected_sports'],
                                   state['date_from'], state['date_to'])
-            data = _to_display_data(filtered)
-            raw = json.dumps({'data': data, 'mode': state['mode'], 'tile': state['tile']})
+            mode = state['mode']
+            if mode in ('heatmap', 'heatmap_log'):
+                data = _to_display_data(filtered)
+            else:
+                data = _to_path_data(filtered)
+
+            raw = json.dumps({'data': data, 'mode': mode, 'tile': state['tile']})
             return len(data), gzip.compress(raw.encode(), compresslevel=1)
 
-        n_cells, compressed = await asyncio.to_thread(_build)
+        n_items, compressed = await asyncio.to_thread(_build)
 
         global _map_payload
         _map_payload = compressed
 
         pts_label.set_text(f"{len(state['df_clean']):,}")
-        display_label.set_text(f"{n_cells:,}")
+        display_label.set_text(f"{n_items:,}")
         client.run_javascript("window.fetchAndRender()")
 
     # ── Data loading ─────────────────────────────────────────────────────────
