@@ -106,7 +106,7 @@ _MAP_JS = """
   const { DeckGL, TileLayer, BitmapLayer, HeatmapLayer, ScatterplotLayer } = deck;
 
   const TILES = {
-    dark:      'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+    dark:      'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
     osm:       'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
     topo:      'https://tile.opentopomap.org/{z}/{x}/{y}.png',
     satellite: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
@@ -523,5 +523,11 @@ async def main_page(client: Client):
 # don't silently drop the connection (default is 1 MB).
 _ng_core.sio.eio.max_http_buffer_size = 32 * 1024 * 1024
 
-ui.run(title=APP_TITLE, port=APP_PORT, reload=False, show=False,
-       gzip_middleware_factory=None)  # disabled: we pre-gzip /mapdata in a thread
+ui.run(
+    title=APP_TITLE, 
+    port=APP_PORT, 
+    reload=False, 
+    show=False,
+    favicon="🏃",
+    gzip_middleware_factory=None
+    )  # disabled: we pre-gzip /mapdata in a thread
