@@ -1,6 +1,8 @@
 import json
 import os
 from typing import Callable, Optional
+import math
+import numpy as np
 
 import fitdecode
 import pandas as pd
@@ -30,6 +32,59 @@ class _SafeProcessor(fitdecode.DefaultDataProcessor):
             super().process_type_date_time(reader, field_data)
         except TypeError:
             pass  # leave raw tuple value; filtered out downstream
+
+
+def _filter_gps_jumps(df: pd.DataFrame, max_speed_kmh: float = 150.0) -> pd.DataFrame:
+    """Filter out zero coordinates and unrealistic instantaneous speed jumps."""
+    if df.empty or 'time' not in df.columns:
+        return df
+
+    # Drop points near (0, 0)
+    df = df[~((df['lat'].abs() < 0.1) & (df['lon'].abs() < 0.1))]
+    if df.empty:
+        return df
+
+    times = pd.to_datetime(df['time'], utc=True, errors='coerce')
+    lat = df['lat'].values
+    lon = df['lon'].values
+
+    if len(df) < 2:
+        return df
+
+    valid_indices = [0]
+    last_valid_idx = 0
+
+    def haversine(lat1, lon1, lat2, lon2):
+        R = 6371000
+        phi1 = np.radians(lat1)
+        phi2 = np.radians(lat2)
+        dphi = np.radians(lat2 - lat1)
+        dlambda = np.radians(lon2 - lon1)
+        a = np.sin(dphi/2)**2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda/2)**2
+        return 2 * R * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+
+    for i in range(1, len(df)):
+        t1 = times.iloc[last_valid_idx]
+        t2 = times.iloc[i]
+        if pd.isna(t1) or pd.isna(t2):
+            valid_indices.append(i)
+            last_valid_idx = i
+            continue
+
+        dt = (t2 - t1).total_seconds()
+        if dt <= 0:
+            continue
+
+        dist = haversine(lat[last_valid_idx], lon[last_valid_idx], lat[i], lon[i])
+        speed = (dist / dt) * 3.6
+
+        if speed > max_speed_kmh:
+            continue
+
+        valid_indices.append(i)
+        last_valid_idx = i
+
+    return df.iloc[valid_indices].reset_index(drop=True)
 
 
 def _process_fit_file(file_path: str):
@@ -100,6 +155,12 @@ def _process_fit_file(file_path: str):
     df['sub_sport']     = sub_sport
     df['activity_name'] = activity_name
     df['file_name']     = os.path.basename(file_path)
+    
+    # Filter GPS jumps and aberrant points
+    df = _filter_gps_jumps(df)
+    if df.empty:
+        return {'no_gps': True}
+
     return df
 
 
